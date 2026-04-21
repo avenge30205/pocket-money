@@ -1,0 +1,26 @@
+{
+  "name": "零用金記帳",
+  "short_name": "零用金",
+  "description": "每月零用金記帳管理系統",
+  "start_url": "/pocket-money/",
+  "scope": "/pocket-money/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1c1c1a",
+  "theme_color": "#3B6D11",
+  "lang": "zh-TW",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
