@@ -228,7 +228,7 @@ function periodAbsKey(offset) {
   while (m > 11) { m -= 12; y++; }
   return `${y}-${String(m+1).padStart(2,'0')}`;
 }
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbyu7RllISQEGXpF4ozkBloQl0__3KQzD9wnTxbzEsFJAH5Wp5a-q1sxQDvHktJI_P88cQ/exec';
+const FB_URL = 'https://pocket-money-7820f-default-rtdb.asia-southeast1.firebasedatabase.app/records.json';
 let _records = [];
 
 function showSyncStatus(msg, ok, warn) {
@@ -238,58 +238,40 @@ function showSyncStatus(msg, ok, warn) {
   el.style.color = ok ? 'var(--green)' : warn ? 'var(--amber)' : 'var(--text2)';
 }
 
-function jsonpGet(url) {
-  return new Promise((resolve, reject) => {
-    const cb  = '_cb' + Date.now() + Math.random().toString(36).slice(2,8);
-    const s   = document.createElement('script');
-    const tid = setTimeout(() => { cleanup(); reject(new Error('timeout')); }, 10000);
-    function cleanup() {
-      clearTimeout(tid);
-      delete window[cb];
-      if (s.parentNode) s.parentNode.removeChild(s);
-    }
-    window[cb] = data => { cleanup(); resolve(data); };
-    s.onerror  = () => { cleanup(); reject(new Error('load error')); };
-    s.src = url + '?action=get&callback=' + cb;
-    document.head.appendChild(s);
-  });
-}
-
-async function postToSheets(recs) {
-  // no-cors POST — 寫入不需要讀回應
-  await fetch(GAS_URL, {
-    method: 'POST',
-    mode: 'no-cors',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(recs)
-  });
-}
-
-async function loadFromSheets() {
+async function loadFromFirebase() {
   showSyncStatus('同步中…');
-  // 先顯示 localStorage 快取
   try { _records = JSON.parse(localStorage.getItem('pm_records_v3') || '[]'); } catch(_) { _records = []; }
   render();
   try {
-    const data = await jsonpGet(GAS_URL);
-    if (data && Array.isArray(data.records)) {
-      _records = data.records;
-      localStorage.setItem('pm_records_v3', JSON.stringify(_records));
-      render();
+    const res  = await fetch(FB_URL);
+    const data = await res.json();
+    if (data && typeof data === 'object') {
+      _records = Object.values(data);
+    } else {
+      _records = [];
     }
+    localStorage.setItem('pm_records_v3', JSON.stringify(_records));
+    render();
     showSyncStatus('已同步', true);
   } catch(e) {
     showSyncStatus('離線模式', false, true);
   }
 }
 
-async function saveToSheets(recs) {
+async function saveToFirebase(recs) {
   _records = recs;
   localStorage.setItem('pm_records_v3', JSON.stringify(recs));
   render();
   showSyncStatus('儲存中…');
   try {
-    await postToSheets(recs);
+    // 轉成以 id 為 key 的物件存進 Firebase
+    const obj = {};
+    recs.forEach(r => { obj[r.id] = r; });
+    await fetch(FB_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj)
+    });
     showSyncStatus('已儲存', true);
   } catch(e) {
     showSyncStatus('暫存本機', false, true);
@@ -297,7 +279,7 @@ async function saveToSheets(recs) {
 }
 
 function getRecords() { return _records; }
-async function saveRecords(r) { await saveToSheets(r); }
+async function saveRecords(r) { await saveToFirebase(r); }
 
 function getPeriodRecords(offset) {
   const key = periodAbsKey(offset);
@@ -592,7 +574,7 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 
 document.getElementById('expenseDate').value = toDateStr(new Date());
 document.getElementById('incomeDate').value  = toDateStr(new Date());
-loadFromSheets();
+loadFromFirebase();
 </script>
 </body>
 </html>
