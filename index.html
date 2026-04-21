@@ -114,7 +114,7 @@ select:focus, input:focus { outline: 2px solid var(--green); outline-offset: 1px
 </head>
 <body>
 <div class="wrap">
-  <h1>零用金記帳</h1>
+  <h1>零用金記帳 <span id="syncStatus" style="font-size:12px;font-weight:400;margin-left:8px;color:var(--text2);">載入中…</span></h1>
 
   <div class="month-nav">
     <button onclick="changeMonth(-1)">&#8592;</button>
@@ -228,12 +228,54 @@ function periodAbsKey(offset) {
   while (m > 11) { m -= 12; y++; }
   return `${y}-${String(m+1).padStart(2,'0')}`;
 }
-function getRecords() {
-  try { return JSON.parse(localStorage.getItem('pm_records_v3') || '[]'); } catch(e) { return []; }
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbyu7RllISQEGXpF4ozkBloQl0__3KQzD9wnTxbzEsFJAH5Wp5a-q1sxQDvHktJI_P88cQ/exec';
+let _records = [];
+
+async function loadFromSheets() {
+  showSyncStatus('同步中…');
+  try {
+    const res  = await fetch(GAS_URL);
+    const rows = await res.json();
+    _records = rows.slice(1).filter(r => r[0]).map(r => ({
+      id: r[0], type: r[1], cat: r[2], date: r[3],
+      desc: r[4], amount: Number(r[5]), periodKey: r[6]
+    }));
+    localStorage.setItem('pm_records_v3', JSON.stringify(_records));
+    showSyncStatus('已同步', true);
+  } catch(e) {
+    try { _records = JSON.parse(localStorage.getItem('pm_records_v3') || '[]'); } catch(_) {}
+    showSyncStatus('離線模式，資料為本機暫存', false, true);
+  }
+  render();
 }
-function saveRecords(r) {
-  try { localStorage.setItem('pm_records_v3', JSON.stringify(r)); } catch(e) {}
+
+async function saveToSheets(recs) {
+  _records = recs;
+  localStorage.setItem('pm_records_v3', JSON.stringify(recs));
+  showSyncStatus('儲存中…');
+  try {
+    await fetch(GAS_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'save', records: recs })
+    });
+    showSyncStatus('已儲存', true);
+  } catch(e) {
+    showSyncStatus('離線，資料暫存本機', false, true);
+  }
 }
+
+function showSyncStatus(msg, ok, warn) {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = ok ? 'var(--green)' : warn ? 'var(--amber)' : 'var(--text2)';
+}
+
+function getRecords() { return _records; }
+async function saveRecords(r) { await saveToSheets(r); render(); }
+
 function getPeriodRecords(offset) {
   const key = periodAbsKey(offset);
   return getRecords().filter(r => r.periodKey === key);
@@ -337,6 +379,27 @@ function render() {
   }).join('');
 }
 
+function cellStyle(bold, bgHex, fontHex, align, numFmt) {
+  const s = {
+    font: { name: 'Arial', sz: 11, bold: !!bold, color: { rgb: (fontHex||'000000') } },
+    alignment: { horizontal: align||'left', vertical: 'center', wrapText: false },
+    border: {
+      top:    { style: 'thin', color: { rgb: 'CCCCCC' } },
+      bottom: { style: 'thin', color: { rgb: 'CCCCCC' } },
+      left:   { style: 'thin', color: { rgb: 'CCCCCC' } },
+      right:  { style: 'thin', color: { rgb: 'CCCCCC' } },
+    }
+  };
+  if (bgHex) s.fill = { patternType: 'solid', fgColor: { rgb: bgHex } };
+  if (numFmt) s.numFmt = numFmt;
+  return s;
+}
+
+function setCell(ws, col, row, value, bold, bg, fg, align, numFmt) {
+  const addr = col + row;
+  ws[addr] = { v: value, t: typeof value === 'number' ? 'n' : 's', s: cellStyle(bold, bg, fg, align, numFmt) };
+}
+
 function exportExcel() {
   const recs = getPeriodRecords(currentPeriod);
   if (!recs.length) { showToast('本期尚無記錄，無法匯出'); return; }
@@ -345,33 +408,109 @@ function exportExcel() {
   const income  = recs.filter(r => r.type === 'income').reduce((s,r) => s+r.amount, 0);
   const spent   = recs.filter(r => r.type === 'expense').reduce((s,r) => s+r.amount, 0);
   const balance = income - spent;
+  const sorted  = [...recs].sort((a,b) => new Date(a.date) - new Date(b.date));
 
   const wb = XLSX.utils.book_new();
 
-  const sorted = [...recs].sort((a,b) => new Date(a.date) - new Date(b.date));
-  const rows1 = [['日期','類別','說明','收入（元）','支出（元）','備註']];
+  // ── 工作表1：本期明細 ──
+  const ws1 = {};
+  const HEADER_BG = '1E4D6B', HEADER_FG = 'FFFFFF';
+  const INCOME_BG = 'E8F5E0', LATE_BG = 'FFF3CD';
+  const TOTAL_BG  = 'F0F0F0', BALANCE_BG = balance < 0 ? 'FDECEA' : 'E8F5E0';
+  const BALANCE_FG = balance < 0 ? 'A32D2D' : '3B6D11';
+
+  // 標題列（第1列）：合併說明用
+  ws1['A1'] = { v: `零用金明細　請款區間：${startStr} — ${endStr}`, t: 's',
+    s: { font: { name: 'Arial', sz: 13, bold: true, color: { rgb: HEADER_BG } },
+         alignment: { horizontal: 'left', vertical: 'center' } } };
+
+  // 欄位標題（第2列）
+  const headers1 = ['日期','類別','說明','收入（元）','支出（元）','備註'];
+  const cols1 = ['A','B','C','D','E','F'];
+  headers1.forEach((h,i) => setCell(ws1, cols1[i], 2, h, true, HEADER_BG, HEADER_FG, 'center'));
+
+  // 資料列（第3列起）
+  let row = 3;
   sorted.forEach(r => {
     const isInc  = r.type === 'income';
     const isLate = !isInc && new Date(r.date) < start;
     const label  = isInc ? '提撥收入' : (CATS[r.cat] ? CATS[r.cat].label : r.cat);
-    rows1.push([r.date, label, r.desc || '', isInc ? r.amount : '', isInc ? '' : r.amount, isLate ? '補登漏單' : '']);
+    const rowBg  = isInc ? INCOME_BG : (isLate ? LATE_BG : null);
+    setCell(ws1, 'A', row, r.date,          false, rowBg, null, 'center');
+    setCell(ws1, 'B', row, label,           false, rowBg, null, 'center');
+    setCell(ws1, 'C', row, r.desc||'',      false, rowBg, null, 'left');
+    setCell(ws1, 'D', row, isInc ? r.amount : 0, false, rowBg, '3B6D11', 'right', '#,##0');
+    setCell(ws1, 'E', row, isInc ? 0 : r.amount, false, rowBg, null,     'right', '#,##0');
+    setCell(ws1, 'F', row, isLate ? '補登漏單' : '', false, rowBg, '854F0B', 'center');
+    row++;
   });
-  rows1.push([], ['','','小計', income, spent, '']);
-  rows1.push(['','','本期結餘', balance >= 0 ? balance : '', balance < 0 ? Math.abs(balance) : '', balance < 0 ? '（超支）' : '']);
-  const ws1 = XLSX.utils.aoa_to_sheet(rows1);
-  ws1['!cols'] = [{wch:14},{wch:10},{wch:24},{wch:14},{wch:14},{wch:14}];
+
+  // 空列
+  row++;
+
+  // 小計列
+  setCell(ws1, 'A', row, '',        true, TOTAL_BG, null, 'left');
+  setCell(ws1, 'B', row, '',        true, TOTAL_BG, null, 'left');
+  setCell(ws1, 'C', row, '小計',    true, TOTAL_BG, null, 'right');
+  setCell(ws1, 'D', row, income,    true, TOTAL_BG, '3B6D11', 'right', '#,##0');
+  setCell(ws1, 'E', row, spent,     true, TOTAL_BG, null,     'right', '#,##0');
+  setCell(ws1, 'F', row, '',        true, TOTAL_BG, null, 'left');
+  row++;
+
+  // 結餘列
+  setCell(ws1, 'A', row, '',        true, BALANCE_BG, null, 'left');
+  setCell(ws1, 'B', row, '',        true, BALANCE_BG, null, 'left');
+  setCell(ws1, 'C', row, '本期結餘', true, BALANCE_BG, BALANCE_FG, 'right');
+  setCell(ws1, 'D', row, balance >= 0 ? balance : 0,        true, BALANCE_BG, BALANCE_FG, 'right', '#,##0');
+  setCell(ws1, 'E', row, balance < 0  ? Math.abs(balance) : 0, true, BALANCE_BG, BALANCE_FG, 'right', '#,##0');
+  setCell(ws1, 'F', row, balance < 0 ? '（超支）' : '達標', true, BALANCE_BG, BALANCE_FG, 'center');
+
+  ws1['!ref'] = `A1:F${row}`;
+  ws1['!cols'] = [{wch:14},{wch:10},{wch:28},{wch:14},{wch:14},{wch:12}];
+  ws1['!rows'] = [{hpt:22},{hpt:20}];
   XLSX.utils.book_append_sheet(wb, ws1, '本期明細');
+
+  // ── 工作表2：類別統計 ──
+  const ws2 = {};
+  ws2['A1'] = { v: '類別支出統計', t: 's',
+    s: { font: { name: 'Arial', sz: 13, bold: true, color: { rgb: HEADER_BG } },
+         alignment: { horizontal: 'left', vertical: 'center' } } };
+
+  setCell(ws2, 'A', 2, '類別',    true, HEADER_BG, HEADER_FG, 'center');
+  setCell(ws2, 'B', 2, '金額（元）', true, HEADER_BG, HEADER_FG, 'center');
+  setCell(ws2, 'C', 2, '佔比',    true, HEADER_BG, HEADER_FG, 'center');
 
   const catTotals = {};
   Object.keys(CATS).forEach(k => catTotals[k] = 0);
   recs.filter(r => r.type === 'expense').forEach(r => { catTotals[r.cat] = (catTotals[r.cat]||0) + r.amount; });
-  const rows2 = [[`請款區間：${startStr} — ${endStr}`], [], ['類別','金額（元）','佔比']];
+
+  const catColors = { '差旅':'DBEAFE', '拜拜':'DCFCE7', '雜支':'F3F4F6', '餐費-餐食':'FEE2E2', '餐費-飲品':'FEF3C7' };
+  let r2 = 3;
   Object.keys(CATS).forEach(k => {
-    rows2.push([CATS[k].label, catTotals[k], spent > 0 ? ((catTotals[k]/spent)*100).toFixed(1)+'%' : '0.0%']);
+    const v   = catTotals[k] || 0;
+    const pct = spent > 0 ? ((v/spent)*100).toFixed(1)+'%' : '0.0%';
+    const bg  = catColors[k] || null;
+    setCell(ws2, 'A', r2, CATS[k].label, false, bg, null, 'center');
+    setCell(ws2, 'B', r2, v,             false, bg, null, 'right', '#,##0');
+    setCell(ws2, 'C', r2, pct,           false, bg, null, 'center');
+    r2++;
   });
-  rows2.push([], ['支出合計', spent, '100%'], ['提撥收入', income, ''], ['本期結餘', balance, '']);
-  const ws2 = XLSX.utils.aoa_to_sheet(rows2);
-  ws2['!cols'] = [{wch:14},{wch:14},{wch:10}];
+
+  r2++;
+  setCell(ws2, 'A', r2, '支出合計', true, TOTAL_BG, null,       'center');
+  setCell(ws2, 'B', r2, spent,      true, TOTAL_BG, null,       'right', '#,##0');
+  setCell(ws2, 'C', r2, '100%',     true, TOTAL_BG, null,       'center');
+  r2++;
+  setCell(ws2, 'A', r2, '提撥收入', true, INCOME_BG, '3B6D11',  'center');
+  setCell(ws2, 'B', r2, income,     true, INCOME_BG, '3B6D11',  'right', '#,##0');
+  setCell(ws2, 'C', r2, '',         true, INCOME_BG, null,      'center');
+  r2++;
+  setCell(ws2, 'A', r2, '本期結餘', true, BALANCE_BG, BALANCE_FG, 'center');
+  setCell(ws2, 'B', r2, balance,    true, BALANCE_BG, BALANCE_FG, 'right', '#,##0');
+  setCell(ws2, 'C', r2, balance < 0 ? '超支' : '達標', true, BALANCE_BG, BALANCE_FG, 'center');
+
+  ws2['!ref'] = `A1:C${r2}`;
+  ws2['!cols'] = [{wch:14},{wch:16},{wch:10}];
   XLSX.utils.book_append_sheet(wb, ws2, '類別統計');
 
   const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
@@ -393,7 +532,7 @@ function switchTab(tab) {
   document.getElementById('expenseForm').style.display = tab === 'expense' ? '' : 'none';
   document.getElementById('incomeForm').style.display  = tab === 'income'  ? '' : 'none';
 }
-function addExpense() {
+async function addExpense() {
   const cat = document.getElementById('catSelect').value;
   const date = document.getElementById('expenseDate').value;
   const desc = document.getElementById('expenseDesc').value.trim();
@@ -402,13 +541,12 @@ function addExpense() {
   if (!amount || amount <= 0) { showToast('請輸入有效金額'); return; }
   const recs = getRecords();
   recs.push({ id: uid(), type: 'expense', cat, date, desc, amount, periodKey: periodAbsKey(currentPeriod) });
-  saveRecords(recs);
+  await saveRecords(recs);
   document.getElementById('expenseDesc').value = '';
   document.getElementById('expenseAmt').value  = '';
-  render();
   showToast('已新增支出');
 }
-function addIncome() {
+async function addIncome() {
   const date = document.getElementById('incomeDate').value;
   const desc = document.getElementById('incomeDesc').value.trim();
   const amount = parseFloat(document.getElementById('incomeAmt').value);
@@ -416,16 +554,14 @@ function addIncome() {
   if (!amount || amount <= 0) { showToast('請輸入有效金額'); return; }
   const recs = getRecords();
   recs.push({ id: uid(), type: 'income', cat: 'income', date, desc, amount, periodKey: periodAbsKey(currentPeriod) });
-  saveRecords(recs);
+  await saveRecords(recs);
   document.getElementById('incomeDesc').value = '';
   document.getElementById('incomeAmt').value  = '';
-  render();
   showToast('已新增提撥收入');
 }
-function deleteRecord(id) {
+async function deleteRecord(id) {
   if (!confirm('確定刪除此筆記錄？')) return;
-  saveRecords(getRecords().filter(r => r.id !== id));
-  render();
+  await saveRecords(getRecords().filter(r => r.id !== id));
   showToast('已刪除');
 }
 function changeMonth(dir) { currentPeriod += dir; render(); }
@@ -433,7 +569,7 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 
 document.getElementById('expenseDate').value = toDateStr(new Date());
 document.getElementById('incomeDate').value  = toDateStr(new Date());
-render();
+loadFromSheets();
 </script>
 </body>
 </html>
