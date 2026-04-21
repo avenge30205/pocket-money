@@ -231,20 +231,38 @@ function periodAbsKey(offset) {
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbyu7RllISQEGXpF4ozkBloQl0__3KQzD9wnTxbzEsFJAH5Wp5a-q1sxQDvHktJI_P88cQ/exec';
 let _records = [];
 
+function showSyncStatus(msg, ok, warn) {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = ok ? 'var(--green)' : warn ? 'var(--amber)' : 'var(--text2)';
+}
+
+function jsonp(url) {
+  return new Promise((resolve, reject) => {
+    const cb = 'cb_' + Date.now();
+    const s  = document.createElement('script');
+    s.src    = url + '&callback=' + cb;
+    window[cb] = data => { delete window[cb]; document.body.removeChild(s); resolve(data); };
+    s.onerror  = () => { delete window[cb]; document.body.removeChild(s); reject(new Error('jsonp fail')); };
+    document.body.appendChild(s);
+  });
+}
+
 async function loadFromSheets() {
   showSyncStatus('同步中…');
   try {
-    const res  = await fetch(GAS_URL);
-    const rows = await res.json();
-    _records = rows.slice(1).filter(r => r[0]).map(r => ({
-      id: r[0], type: r[1], cat: r[2], date: r[3],
-      desc: r[4], amount: Number(r[5]), periodKey: r[6]
-    }));
+    const data = await jsonp(GAS_URL + '?action=get');
+    if (data && data.records) {
+      _records = data.records;
+    } else {
+      _records = [];
+    }
     localStorage.setItem('pm_records_v3', JSON.stringify(_records));
     showSyncStatus('已同步', true);
   } catch(e) {
-    try { _records = JSON.parse(localStorage.getItem('pm_records_v3') || '[]'); } catch(_) {}
-    showSyncStatus('離線模式，資料為本機暫存', false, true);
+    try { _records = JSON.parse(localStorage.getItem('pm_records_v3') || '[]'); } catch(_) { _records = []; }
+    showSyncStatus('離線模式', false, true);
   }
   render();
 }
@@ -254,23 +272,12 @@ async function saveToSheets(recs) {
   localStorage.setItem('pm_records_v3', JSON.stringify(recs));
   showSyncStatus('儲存中…');
   try {
-    await fetch(GAS_URL, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'text/plain' },
-      body: JSON.stringify({ action: 'save', records: recs })
-    });
+    const encoded = encodeURIComponent(JSON.stringify(recs));
+    await jsonp(GAS_URL + '?action=save&data=' + encoded);
     showSyncStatus('已儲存', true);
   } catch(e) {
     showSyncStatus('離線，資料暫存本機', false, true);
   }
-}
-
-function showSyncStatus(msg, ok, warn) {
-  const el = document.getElementById('syncStatus');
-  if (!el) return;
-  el.textContent = msg;
-  el.style.color = ok ? 'var(--green)' : warn ? 'var(--amber)' : 'var(--text2)';
 }
 
 function getRecords() { return _records; }
